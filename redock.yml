@@ -1,0 +1,132 @@
+---
+- name: Create our containers
+  hosts: localhost
+  gather_facts: no
+  vars:
+    docker_vol_certs: rd_certs
+    docker_vol_logs: rd_logs
+    docker_vol_files: rd_files
+    docker_redock_network: rd_inside
+    docker_default_network: rd_default
+    image1: cert-gen
+    image2: traefik
+    image3: templates
+    image4: public-files
+    image5: portainer-app
+    app_host_port: 80
+    app_container_port: 80
+
+  tasks:
+    - name: "Create a Volume Certs"
+      docker_volume:
+        name: "{{ docker_vol_certs }}"
+
+    - name: "Create a Volume Logs"
+      docker_volume:
+        name: "{{ docker_vol_logs }}"
+
+    - name: "Create a Volume Files"
+      docker_volume:
+        name: "{{ docker_vol_files }}"
+
+    - name: "Create a inside network"
+      docker_network:
+        internal: yes
+        name: "{{ docker_redock_network }}"
+
+    - name: "Create a default network"
+      docker_network:
+        name: "{{ docker_default_network }}"
+
+    - name: "Create The omgwtfssl container"
+      docker_container:
+        name: "{{ image1 }}"
+        image: paulczar/omgwtfssl
+        volumes:
+          - "{{ docker_vol_certs }}:/certs"
+        labels:
+            traefik.enable: "false"
+        state: started
+
+    - name: "Build Traefik image from Dockerfile"
+      docker_image:
+        name: "{{ image2 }}"
+        source: build
+        build:
+          pull: no
+          path: traefik/
+
+    - name: "Running Traefik reverse-proxy container"
+      docker_container:
+        name: "{{ image2 }}"
+        image: traefik
+        networks:
+          - name: "{{ docker_default_network }}"
+          - name: "{{ docker_redock_network }}"
+        published_ports:
+          - "{{ app_host_port }}:{{ app_container_port }}"
+          - "443:443"
+        volumes:
+          - "/var/run/docker.sock:/var/run/docker.sock"
+          - "{{ docker_vol_certs }}:/certs"
+          - "{{ docker_vol_logs }}:/logs"
+        labels:
+          traefik.frontend.rule: "PathPrefixStrip:/api"
+          traefik.frontend.auth.basic.usersFile: "/etc/traefik/.htpasswd"
+          traefik.port: "8081"
+        state: started
+
+    - name: "Build Templates image from Dockerfile"
+      docker_image:
+        name: "{{ image3 }}"
+        source: build
+        build:
+          pull: no
+          path: templates/
+
+    - name: "Running Templates container"
+      docker_container:
+        name: "{{ image3 }}"
+        image: templates
+        networks:
+          - name: "{{ docker_redock_network }}"
+        labels:
+          traefik.enable: "false"
+        state: started
+
+    - name: "Launch HTTP Server container"
+      docker_container:
+        name: "{{ image4 }}"
+        image: aikain/simplehttpserver:0.1
+        volumes:
+          - "{{ docker_vol_files }}:/var/www/"
+          - "{{ docker_vol_logs }}:/var/www/logs"
+        networks:
+          - name: "{{ docker_redock_network }}"
+        labels:
+          traefik.sec.frontend.rule: "PathPrefixStrip:/files/logs"
+          traefik.sec.port: "80"
+          traefik.sec.frontend.auth.basic.users: "admin:$$apr1$$JWufnu2u$$jK16K8EczmfIBDk5p3xw6/"
+          traefik.nosec.frontend.rule: "PathPrefixStrip:/files"
+          traefik.nosec.port: "80"
+
+    - name: "Launch Portainer web interface container"
+      docker_container:
+        name: "{{ image5 }}"
+        image: portainer/portainer
+        networks:
+          - name: "{{ docker_redock_network }}"
+        volumes:
+          - "/var/run/docker.sock:/var/run/docker.sock"
+          - "/opt/portainer/data:/data"
+        command:  '--host=unix:///var/run/docker.sock --logo "https://i.postimg.cc/h4w2WjZT/rcbanner.png" --templates "http://templates/templates.yml"'
+        labels:
+          traefik.frontend.rule: "PathPrefixStrip:/portainer"
+          traefik.port: "9000"
+          traefik.passHostHeader: "true"
+          traefik.docker.network: "rd_inside"
+          traefik.backend.loadbalancer.swarm: "true"
+          traefik.backend.loadbalancer.method: "drr"
+          traefik.frontend.redirect.regex: "^(.*)/portainer$"
+          traefik.frontend.redirect.replacement: "$1/portainer/"
+          traefik.frontend.rule: "PathPrefix:/portainer;ReplacePathRegex: ^/portainer/(.*) /$1"
